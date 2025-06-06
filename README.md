@@ -1,6 +1,6 @@
 # NoProp: JAX/Equinox Implementation
 
-A high-performance JAX/Equinox implementation of the **NoProp** algorithm - a revolutionary neural network training method that eliminates both back-propagation and forward-propagation.
+A high-performance JAX/Equinox implementation of the **NoProp** algorithm - a neural network training method that eliminates both back-propagation and forward-propagation.
 
 ## 🎯 What is NoProp?
 
@@ -33,8 +33,8 @@ pip install jax jaxlib equinox optax datasets matplotlib numpy
 
 ### Clone and Install
 ```bash
-git clone <repository-url>
-cd NoProp
+git clone git@github.com:dimarkov/nullaprop.git
+cd nullaprop
 pip install -e .
 ```
 
@@ -42,10 +42,10 @@ pip install -e .
 
 ### Basic Usage
 ```python
-import noprop_jax as noprop
+import nullaprop as nop
 
 # Run MNIST experiment
-results = noprop.run_mnist_experiment(
+results = nop.run_mnist_experiment(
     epochs=50,
     batch_size=128,
     learning_rate=1e-3,
@@ -59,11 +59,11 @@ print(f"Final accuracy: {results['final_accuracy']:.4f}")
 ### Manual Model Creation
 ```python
 import jax
-import noprop_jax as noprop
+import nullaprop as nop
 
 # Initialize model
 key = jax.random.PRNGKey(42)
-model = noprop.init_noprop_model(
+model = nop.init_noprop_model(
     key=key,
     T=10,                    # diffusion steps
     embed_dim=10,            # number of classes
@@ -72,26 +72,19 @@ model = noprop.init_noprop_model(
 )
 
 # Load data and train
-train_iter, test_iter = noprop.load_mnist_data(batch_size=128)
-state = noprop.create_train_state(model, learning_rate=1e-3)
+train_iter, test_iter = nop.load_mnist_data(batch_size=128)
+state = nop.create_train_state(model, learning_rate=1e-3)
 
 # Training step
 for x, y in train_iter():
     key, subkey = jax.random.split(key)
-    state, loss = noprop.train_step(state, x, y, subkey, optimizer)
+    state, loss = nop.train_step(state, x, y, subkey, optimizer)
     break
 
 # Inference
-predictions = noprop.inference_step(state.model, x, key)
+predictions = nop.inference_step(state.model, x, key)
 ```
 
-## 📊 Supported Datasets
-
-- **MNIST**: 28×28 grayscale handwritten digits (10 classes)
-- **CIFAR-10**: 32×32 color images (10 classes)
-- **CIFAR-100**: 32×32 color images (100 classes)
-
-All datasets are loaded via HuggingFace datasets with automatic preprocessing.
 
 ## 🧪 Experiments and Demos
 
@@ -103,16 +96,16 @@ jupyter notebook demo_noprop.ipynb
 ### Command Line Experiments
 ```python
 # MNIST experiment
-noprop.run_mnist_experiment(epochs=50)
+nop.run_mnist_experiment(epochs=50)
 
 # CIFAR-10 experiment  
-noprop.run_cifar10_experiment(epochs=150)
+nop.run_cifar10_experiment(epochs=150)
 
 # Visualize diffusion process
-noprop.demonstrate_diffusion_process("mnist")
+nop.demonstrate_diffusion_process("mnist")
 
 # Benchmark performance
-results = noprop.benchmark_performance(
+results = nop.benchmark_performance(
     dataset="mnist",
     batch_sizes=[32, 64, 128],
     T_values=[5, 10, 20]
@@ -123,11 +116,11 @@ results = noprop.benchmark_performance(
 
 ### Core Components
 
-1. **`noprop_jax/models.py`**: Model definitions using Equinox
-2. **`noprop_jax/training.py`**: Training logic with parallelized layer updates
-3. **`noprop_jax/inference.py`**: Stochastic and deterministic inference
-4. **`noprop_jax/utils.py`**: Data loading, visualization, and utilities
-5. **`noprop_jax/experiments.py`**: Pre-configured experiments and benchmarks
+1. **`nullaprop/models.py`**: Model definitions using Equinox
+2. **`nullaprop/training.py`**: Training logic with parallelized layer updates
+3. **`nullaprop/inference.py`**: Stochastic and deterministic inference
+4. **`nullaprop/utils.py`**: Data loading, visualization, and utilities
+5. **`nullaprop/experiments.py`**: Pre-configured experiments and benchmarks
 
 ### Model Structure
 ```
@@ -152,7 +145,7 @@ NoPropModel
 - Functional programming eliminates mutable state overhead
 - Optional gradient checkpointing for large models
 
-## 📈 Benchmarks
+<!-- ## 📈 Benchmarks
 
 Performance comparison on MNIST (T=10, batch_size=128):
 
@@ -161,45 +154,8 @@ Performance comparison on MNIST (T=10, batch_size=128):
 | Training Time | ~0.5s/epoch | ~0.8s/epoch |
 | Memory Usage | 0.49 GB | 0.87 GB |
 | Parallelizable | ✅ Yes | ❌ No |
-| Final Accuracy | 99.4% | 99.5% |
+| Final Accuracy | 99.4% | 99.5% | -->
 
-## 🔬 Key Algorithms
-
-### Training Process
-1. **Label Corruption**: Add Gaussian noise to one-hot labels
-2. **Independent Learning**: Each layer learns to denoise corrupted labels
-3. **Parallel Updates**: All layers update simultaneously using vmap
-4. **No Gradients**: No back-propagation through the network
-
-### Inference Process  
-1. **Start with Noise**: Begin with Gaussian noise z₀
-2. **Iterative Denoising**: Each layer denoises the previous output
-3. **Final Prediction**: Last layer output gives class probabilities
-
-## 📚 Paper Implementation
-
-This implementation follows the discrete-time NoProp algorithm from Section 2.1:
-
-```
-Training Objective:
-L = E[−log p(y|z_T)] + D_KL(q(z_0|y)||p(z_0)) + 
-    Σ_t η(SNR(t)−SNR(t−1))||û_t(z_{t-1},x)−u_y||²
-```
-
-Key implementation details:
-- Uses cosine noise schedule by default
-- Supports both learned and fixed class embeddings  
-- Implements both stochastic and deterministic inference
-- Vectorized computation over all diffusion steps
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our development guidelines:
-
-1. **Code Style**: Follow JAX/Equinox functional programming patterns
-2. **Testing**: Add tests for new features in `tests/`
-3. **Documentation**: Update docstrings and README for new functionality
-4. **Performance**: Benchmark new features for computational efficiency
 
 ## 📄 Citation
 
@@ -213,11 +169,11 @@ If you use this implementation, please cite both the original paper and this rep
   year={2024}
 }
 
-@software{noprop_jax2024,
-  title={NoProp: JAX/Equinox Implementation},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/your-repo/noprop-jax}
+@software{nullaprop2025,
+  title={nullaprop: JAX/Equinox Implementation},
+  author={Dimitrije Markovic},
+  year={2025},
+  url={https://github.com/dimarkov/nullaprop}
 }
 ```
 
@@ -227,11 +183,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔗 Links
 
-- [Original Paper](NoProp.pdf)
+- [Original Paper](https://github.com/Sid3503/NoProp/blob/main/NoProp.pdf)
 - [JAX Documentation](https://jax.readthedocs.io/)
 - [Equinox Documentation](https://docs.kidger.site/equinox/)
 - [Demo Notebook](demo_noprop.ipynb)
 
 ---
-
-**Made with ❤️ using JAX and Equinox**
