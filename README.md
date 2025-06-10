@@ -1,6 +1,6 @@
 # NoProp: JAX/Equinox Implementation
 
-A JAX/Equinox implementation of the **NoProp** algorithm, inspired by the continuous-time formulation presented in ["Noisy Label Learning with Diffusion Models"](https://arxiv.org/abs/2302.13040) (referred to as NoPropCT in the `yhgon/NoProp` repository) and the original NoProp paper. This version focuses on a continuous-time diffusion process for label embeddings.
+A JAX/Equinox implementation of the **NoProp** algorithm, inspired by the continuous-time formulation presented in ["NoProp: Training Neural Networks without Back-propagation or Forward-propagation"](https://arxiv.org/abs/2503.24322) (referred to as NoPropCT in the `yhgon/NoProp` repository) and the original NoProp paper. This version focuses on a continuous-time diffusion process for label embeddings.
 
 ## 🎯 What is NoProp?
 
@@ -21,7 +21,6 @@ This JAX/Equinox implementation offers:
 - ✅ **Equinox for Models**: Utilizes Equinox for elegant and Pythonic model definitions.
 - ✅ **Inspired by `yhgon/NoProp`**: Aims to translate the core ideas of the continuous-time PyTorch NoProp variant into JAX.
 - ✅ **HuggingFace Datasets**: Uses `datasets` library for data loading.
-- ✅ **Flexible Embedding Initialization**: Supports one-hot, learnable, and prototype-based class embeddings.
 
 ## 📦 Installation
 
@@ -197,13 +196,6 @@ Performance comparison on MNIST (T=10, batch_size=128):
 If you use this implementation, please cite the relevant papers and this repository:
 
 ```bibtex
-@article{li2023noisy,
-  title={Noisy Label Learning with Diffusion Models},
-  author={Li, Qinyu and Shen, Yilun and Zhao, Zhaowei and Liu, Shurui and Liu, Bing},
-  journal={arXiv preprint arXiv:2302.13040},
-  year={2023}
-}
-
 @article{noprop_original_paper,
   title={NoProp: Training Neural Networks Without Back-propagation or Forward-propagation},
   author={Li, Qinyu and Teh, Yee Whye and Pascanu, Razvan},
@@ -225,8 +217,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔗 Links
 
-- Original NoProp Paper: [arXiv:2403.04322](https://arxiv.org/abs/2403.04322)
-- Noisy Label Learning with Diffusion Models: [arXiv:2302.13040](https://arxiv.org/abs/2302.13040)
+- Original NoProp Paper: [arXiv:2503.24322](https://arxiv.org/abs/2503.24322)
 - `yhgon/NoProp` PyTorch repository (inspiration for this JAX port): [https://github.com/yhgon/NoProp](https://github.com/yhgon/NoProp)
 - [JAX Documentation](https://jax.readthedocs.io/)
 - [Equinox Documentation](https://docs.kidger.site/equinox/)
