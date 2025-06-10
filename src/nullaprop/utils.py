@@ -3,6 +3,7 @@ Utility functions for data loading, visualization, and helper functions.
 """
 
 import jax
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from typing import Tuple, Iterator, Optional, Dict, Any
@@ -216,7 +217,7 @@ def print_model_summary(model, input_shape: Tuple[int, ...]) -> None:
     
     # Count parameters
     def count_params(pytree):
-        return sum(x.size for x in jax.tree_util.tree_leaves(pytree))
+        return sum(x.size for x in jax.tree_util.tree_leaves(pytree) if hasattr(x, 'size') and hasattr(x, 'dtype')) # Ensure it's array-like
     
     cnn_params = count_params(model.cnn)
     label_enc_params = count_params(model.label_enc)
@@ -348,8 +349,7 @@ def initialize_with_prototypes_jax(
     feats_list = []
     labels_list = []
     
-    # Assuming model_cnn_part is already a JIT-able function or eqx.Module
-    @partial(jax.jit, static_argnums=(2,))
+    @eqx.filter_jit
     def get_features_batch(cnn_model, batch_images, feature_dim_static):
         return cnn_model(batch_images)
 
@@ -360,7 +360,7 @@ def initialize_with_prototypes_jax(
         # Infer feature_dim from the first batch
         if not feats_list:
             # Temporarily get one feature to know the dimension
-            temp_feat_dim = get_features_batch(model_cnn_part, imgs_batch_jax[[0]], -1).shape[-1]
+            temp_feat_dim = get_features_batch(model_cnn_part, imgs_batch_jax[0:1], -1).shape[-1]
             print(f"Inferred CNN feature dimension for prototypes: {temp_feat_dim}")
         
         feats = get_features_batch(model_cnn_part, imgs_batch_jax, temp_feat_dim)
