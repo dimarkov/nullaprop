@@ -5,42 +5,43 @@ JAX/Equinox Implementation
 A novel training method using diffusion-based denoising for independent layer training.
 """
 
-from .models import NoPropModel, CNN, init_noprop_model
-from .training import train_step, create_train_state, TrainState
-from .inference import inference_step, inference_step_deterministic
+from .models import NoPropCT, CNN, init_noprop_model, LabelEncoder, TimeEncoder, FuseHead, NoiseSchedule, sinusoidal_embedding_jax
+from .training import train_step, create_train_state, TrainState, compute_loss_aligned
+from .inference import inference_ct_euler, inference_ct_heun
 from .utils import (
-    load_mnist_data, load_cifar10_data, load_cifar100_data,
-    create_noise_schedule, get_dataset_info, print_model_summary,
+    load_data, get_dataset_info, print_model_summary, initialize_with_prototypes_jax,
     evaluate_model, plot_training_curves
 )
 from .experiments import (
-    run_mnist_experiment, run_cifar10_experiment,
-    demonstrate_diffusion_process, demonstrate_inference_process,
-    benchmark_performance
+    run_experiment, benchmark_performance
 )
 
 __version__ = "0.1.0"
 __all__ = [
     # Core models
-    "NoPropModel", 
+    "NoPropCT",
     "CNN",
     "init_noprop_model",
+    "LabelEncoder",
+    "TimeEncoder",
+    "FuseHead",
+    "NoiseSchedule",
+    "sinusoidal_embedding_jax",
     
     # Training
-    "train_step", 
+    "train_step",
     "create_train_state",
     "TrainState",
+    "compute_loss_aligned",
     
     # Inference
-    "inference_step",
-    "inference_step_deterministic",
+    "inference_ct_euler",
+    "inference_ct_heun",
     
     # Data utilities
-    "load_mnist_data",
-    "load_cifar10_data", 
-    "load_cifar100_data",
-    "create_noise_schedule",
+    "load_data",
     "get_dataset_info",
+    "initialize_with_prototypes_jax",
     
     # Evaluation and visualization
     "print_model_summary",
@@ -48,9 +49,6 @@ __all__ = [
     "plot_training_curves",
     
     # Experiments
-    "run_mnist_experiment",
-    "run_cifar10_experiment", 
-    "demonstrate_diffusion_process",
-    "demonstrate_inference_process",
+    "run_experiment",
     "benchmark_performance"
 ]

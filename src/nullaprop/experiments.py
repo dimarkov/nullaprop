@@ -6,25 +6,29 @@ import jax
 import jax.numpy as jnp
 import optax
 import time
+from tqdm import tqdm
 from typing import Dict, Any, Tuple
 import matplotlib.pyplot as plt
 
-from .models import init_noprop_model
-from .training import create_train_state, train_step, compute_loss, compute_accuracy
-from .inference import inference_step, inference_with_intermediate
+from .models import init_noprop_model # This is the new init_noprop_model
+from .training import create_train_state, train_step, compute_loss_aligned
+from .inference import inference_ct_euler, inference_ct_heun # New inference functions
+# inference_with_intermediate might need an update or replacement if its logic was tied to old model
 from .utils import (
-    load_mnist_data, load_cifar10_data, load_cifar100_data,
-    get_dataset_info, print_model_summary, evaluate_model,
-    plot_training_curves, visualize_diffusion_process,
-    create_noise_schedule
+    load_data,
+    get_dataset_info, print_model_summary, evaluate_model, # evaluate_model uses old inference_step
+    plot_training_curves, # visualize_diffusion_process might be less relevant for CT
+    # create_noise_schedule # Obsolete, model has NoiseSchedule class
+    initialize_with_prototypes_jax # Added
 )
 
 
-def run_mnist_experiment(
-    epochs: int = 50,
-    batch_size: int = 128,
+def run_experiment(
+    dataset: str = 'mnist',
+    epochs: int = 200,
+    batch_size: int = 2048,
     learning_rate: float = 1e-3,
-    T: int = 10,
+    T: int = 40,
     seed: int = 42
 ) -> Dict[str, Any]:
     """
@@ -48,42 +52,43 @@ def run_mnist_experiment(
     key = jax.random.PRNGKey(seed)
     key, model_key = jax.random.split(key)
     
-    # Load MNIST data
-    print("Loading MNIST dataset...")
-    train_iterator, test_iterator = load_mnist_data(batch_size=batch_size)
-    dataset_info = get_dataset_info("mnist")
+    # Load data
+    print(f"Loading {dataset.upper()} dataset...")
+    train_iterator, test_iterator = load_data(dataset, batch_size=batch_size)
+    dataset_info = get_dataset_info(dataset)
     
-    # Initialize model
-    print("Initializing NoProp model...")
+    # Initialize model (using new init_noprop_model signature)
+    print("Initializing NoProp model (CT version)...")
     model = init_noprop_model(
         key=model_key,
-        T=T,
-        embed_dim=dataset_info["num_classes"],
-        feature_dim=128,
-        input_channels=dataset_info["input_channels"]
+        num_classes=dataset_info["num_classes"],
+        input_channels=dataset_info["input_channels"],
+        embed_dim=256,
     )
     
-    # Print model summary
-    print_model_summary(model, dataset_info["input_size"])
-    
+    # Print model summary (needs update for new model structure)
+    # print_model_summary(model, dataset_info["input_size"]) # Old summary fn
+    print(f"Model initialized: embed_dim={model.embed_dim}, num_classes={model.num_classes}")
+
     # Create training state
-    optimizer = optax.adamw(learning_rate=learning_rate, weight_decay=1e-4)
-    state = create_train_state(model, learning_rate=learning_rate)
+    optimizer = optax.adamw(learning_rate=learning_rate, weight_decay=1e-3)
+    # create_train_state now requires a key
+    key, state_key = jax.random.split(key)
+    state = create_train_state(model, optimizer, key=state_key, learning_rate=learning_rate)
     
     # Training loop
     print(f"\nStarting training for {epochs} epochs...")
     losses = []
     accuracies = []
     
-    for epoch in range(epochs):
-        epoch_start = time.time()
+    for epoch in (pbar := tqdm(range(1, epochs + 1))):
         epoch_loss = 0.0
         num_batches = 0
         
         # Training
-        for x, y in train_iterator():
-            key, subkey = jax.random.split(key)
-            state, loss = train_step(state, x, y, subkey, optimizer)
+        for x, y in train_iterator:
+            # train_step now takes optimizer directly, key is in state
+            state, loss = train_step(state, x, y, optimizer, eta=1.0) # Assuming eta=1.0
             epoch_loss += loss
             num_batches += 1
         
@@ -91,27 +96,54 @@ def run_mnist_experiment(
         losses.append(float(avg_loss))
         
         # Evaluation every 5 epochs
-        if epoch % 5 == 0 or epoch == epochs - 1:
-            key, eval_key = jax.random.split(key)
-            accuracy, eval_loss = evaluate_model(state.model, test_iterator, eval_key, num_batches=10)
-            accuracies.append(accuracy)
-            
-            epoch_time = time.time() - epoch_start
-            print(f"Epoch {epoch+1:2d}/{epochs} | Loss: {avg_loss:.4f} | Test Acc: {accuracy:.4f} | Time: {epoch_time:.2f}s")
-        else:
-            epoch_time = time.time() - epoch_start
-            print(f"Epoch {epoch+1:2d}/{epochs} | Loss: {avg_loss:.4f} | Time: {epoch_time:.2f}s")
+        if epoch % 5 == 0 or epoch == epochs:
+            eval_key, state_key_new = jax.random.split(state.key)
+            state = state._replace(key=state_key_new) # Update state's key
+
+            # evaluate_model needs to be updated or use a local evaluation loop
+            # For now, let's implement a local eval loop using new inference
+            test_correct = 0
+            test_total = 0
+            test_loss_sum = 0
+            test_batches = 0
+            for x_test, y_test in test_iterator:
+                key_inf, eval_key = jax.random.split(eval_key)
+                preds = inference_ct_heun(state.model, x_test, key_inf, T_steps=T) # Example T_steps
+                test_correct += jnp.sum(preds == y_test)
+                test_total += len(y_test)
+                
+                key_loss, eval_key = jax.random.split(eval_key)
+                loss_val = compute_loss_aligned(state.model, x_test, y_test, key_loss, eta=1.0)
+                test_loss_sum += loss_val
+                test_batches +=1
+
+            accuracy = test_correct / test_total if test_total > 0 else 0.0
+            eval_loss = test_loss_sum / test_batches if test_batches > 0 else 0.0
+            accuracies.append(float(accuracy))
+
+        pbar.set_postfix(loss=f'{avg_loss:.4f}')
     
     # Final evaluation
     print("\nFinal evaluation...")
-    key, eval_key = jax.random.split(key)
-    final_accuracy, final_loss = evaluate_model(state.model, test_iterator, eval_key)
-    
-    print(f"Final Test Accuracy: {final_accuracy:.4f}")
-    print(f"Final Test Loss: {final_loss:.4f}")
-    
-    # Plot training curves
-    plot_training_curves(losses, accuracies, "NoProp MNIST Training")
+    final_eval_key, _ = jax.random.split(state.key) # Use final state's key
+    # Full evaluation using local loop
+    test_correct_final = 0
+    test_total_final = 0
+    test_loss_sum_final = 0
+    test_batches_final = 0
+    for x_test, y_test in test_iterator:
+        key_inf, final_eval_key = jax.random.split(final_eval_key)
+        preds = inference_ct_euler(state.model, x_test, key_inf, T_steps=100) # More steps for final
+        test_correct_final += jnp.sum(preds == y_test)
+        test_total_final += len(y_test)
+        
+        key_loss, final_eval_key = jax.random.split(final_eval_key)
+        loss_val = compute_loss_aligned(state.model, x_test, y_test, key_loss, eta=1.0)
+        test_loss_sum_final += loss_val
+        test_batches_final +=1
+        
+    final_accuracy = test_correct_final / test_total_final if test_total_final > 0 else 0.0
+    final_loss = test_loss_sum_final / test_batches_final if test_batches_final > 0 else 0.0
     
     return {
         "model": state.model,
@@ -121,220 +153,6 @@ def run_mnist_experiment(
         "accuracies": accuracies,
         "dataset": "mnist"
     }
-
-
-def run_cifar10_experiment(
-    epochs: int = 150,
-    batch_size: int = 128,
-    learning_rate: float = 1e-3,
-    T: int = 10,
-    seed: int = 42
-) -> Dict[str, Any]:
-    """
-    Run NoProp experiment on CIFAR-10 dataset.
-    
-    Args:
-        epochs: Number of training epochs
-        batch_size: Batch size for training
-        learning_rate: Learning rate for optimizer
-        T: Number of diffusion steps
-        seed: Random seed
-        
-    Returns:
-        Dictionary with experiment results
-    """
-    print("="*60)
-    print("NOPROP CIFAR-10 EXPERIMENT")
-    print("="*60)
-    
-    # Initialize random key
-    key = jax.random.PRNGKey(seed)
-    key, model_key = jax.random.split(key)
-    
-    # Load CIFAR-10 data
-    print("Loading CIFAR-10 dataset...")
-    train_iterator, test_iterator = load_cifar10_data(batch_size=batch_size)
-    dataset_info = get_dataset_info("cifar10")
-    
-    # Initialize model
-    print("Initializing NoProp model...")
-    model = init_noprop_model(
-        key=model_key,
-        T=T,
-        embed_dim=dataset_info["num_classes"],
-        feature_dim=128,
-        input_channels=dataset_info["input_channels"]
-    )
-    
-    # Print model summary
-    print_model_summary(model, dataset_info["input_size"])
-    
-    # Create training state with learning rate schedule
-    schedule = optax.exponential_decay(learning_rate, transition_steps=1000, decay_rate=0.95)
-    optimizer = optax.adamw(learning_rate=schedule, weight_decay=1e-4)
-    state = create_train_state(model, learning_rate=learning_rate)
-    
-    # Training loop
-    print(f"\nStarting training for {epochs} epochs...")
-    losses = []
-    accuracies = []
-    
-    for epoch in range(epochs):
-        epoch_start = time.time()
-        epoch_loss = 0.0
-        num_batches = 0
-        
-        # Training
-        for x, y in train_iterator():
-            key, subkey = jax.random.split(key)
-            state, loss = train_step(state, x, y, subkey, optimizer)
-            epoch_loss += loss
-            num_batches += 1
-        
-        avg_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
-        losses.append(float(avg_loss))
-        
-        # Evaluation every 10 epochs
-        if epoch % 10 == 0 or epoch == epochs - 1:
-            key, eval_key = jax.random.split(key)
-            accuracy, eval_loss = evaluate_model(state.model, test_iterator, eval_key, num_batches=10)
-            accuracies.append(accuracy)
-            
-            epoch_time = time.time() - epoch_start
-            print(f"Epoch {epoch+1:3d}/{epochs} | Loss: {avg_loss:.4f} | Test Acc: {accuracy:.4f} | Time: {epoch_time:.2f}s")
-        else:
-            epoch_time = time.time() - epoch_start
-            print(f"Epoch {epoch+1:3d}/{epochs} | Loss: {avg_loss:.4f} | Time: {epoch_time:.2f}s")
-    
-    # Final evaluation
-    print("\nFinal evaluation...")
-    key, eval_key = jax.random.split(key)
-    final_accuracy, final_loss = evaluate_model(state.model, test_iterator, eval_key)
-    
-    print(f"Final Test Accuracy: {final_accuracy:.4f}")
-    print(f"Final Test Loss: {final_loss:.4f}")
-    
-    # Plot training curves
-    plot_training_curves(losses, accuracies, "NoProp CIFAR-10 Training")
-    
-    return {
-        "model": state.model,
-        "final_accuracy": final_accuracy,
-        "final_loss": final_loss,
-        "losses": losses,
-        "accuracies": accuracies,
-        "dataset": "cifar10"
-    }
-
-
-def demonstrate_diffusion_process(
-    dataset: str = "mnist",
-    num_samples: int = 3,
-    seed: int = 42
-) -> None:
-    """
-    Demonstrate the diffusion process by visualizing label corruption.
-    
-    Args:
-        dataset: Dataset to use ("mnist", "cifar10", "cifar100")
-        num_samples: Number of samples to show
-        seed: Random seed
-    """
-    print(f"Demonstrating diffusion process on {dataset.upper()}...")
-    
-    key = jax.random.PRNGKey(seed)
-    
-    # Load data
-    if dataset == "mnist":
-        _, test_iterator = load_mnist_data(batch_size=32)
-    elif dataset == "cifar10":
-        _, test_iterator = load_cifar10_data(batch_size=32)
-    elif dataset == "cifar100":
-        _, test_iterator = load_cifar100_data(batch_size=32)
-    else:
-        raise ValueError(f"Unknown dataset: {dataset}")
-    
-    dataset_info = get_dataset_info(dataset)
-    
-    # Get a batch of data
-    for x, y in test_iterator():
-        break
-    
-    # Take first few samples
-    x_samples = x[:num_samples]
-    y_samples = y[:num_samples]
-    
-    # Convert labels to one-hot
-    clean_labels = jax.nn.one_hot(y_samples, dataset_info["num_classes"])
-    
-    # Create noise schedule
-    T = 10
-    alpha_schedule = create_noise_schedule(T, "linear")
-    
-    # Create noisy sequence
-    from .training import create_noisy_sequence
-    key, subkey = jax.random.split(key)
-    noisy_sequence = create_noisy_sequence(clean_labels, alpha_schedule, subkey)
-    
-    # Visualize
-    visualize_diffusion_process(
-        clean_labels, 
-        noisy_sequence, 
-        alpha_schedule,
-        class_names=dataset_info["class_names"]
-    )
-
-
-def demonstrate_inference_process(
-    trained_model,
-    dataset: str = "mnist",
-    seed: int = 42
-) -> None:
-    """
-    Demonstrate the inference (reverse diffusion) process.
-    
-    Args:
-        trained_model: Trained NoProp model
-        dataset: Dataset name
-        seed: Random seed
-    """
-    print(f"Demonstrating inference process on {dataset.upper()}...")
-    
-    key = jax.random.PRNGKey(seed)
-    
-    # Load test data
-    if dataset == "mnist":
-        _, test_iterator = load_mnist_data(batch_size=32)
-    elif dataset == "cifar10":
-        _, test_iterator = load_cifar10_data(batch_size=32)
-    elif dataset == "cifar100":
-        _, test_iterator = load_cifar100_data(batch_size=32)
-    else:
-        raise ValueError(f"Unknown dataset: {dataset}")
-    
-    dataset_info = get_dataset_info(dataset)
-    
-    # Get a batch of test data
-    for x, y in test_iterator():
-        break
-    
-    # Take first sample
-    x_sample = x[:1]
-    y_sample = y[:1]
-    
-    # Perform inference with intermediate states
-    key, subkey = jax.random.split(key)
-    predictions, intermediate_states = inference_with_intermediate(trained_model, x_sample, subkey)
-    
-    # Visualize the inference process
-    from .utils import visualize_inference_process
-    visualize_inference_process(
-        predictions,
-        intermediate_states,
-        int(y_sample[0]),
-        class_names=dataset_info["class_names"]
-    )
-
 
 def benchmark_performance(
     dataset: str = "mnist",
@@ -363,66 +181,82 @@ def benchmark_performance(
         "batch_sizes": [],
         "T_values": [],
         "train_times": [],
-        "inference_times": [],
-        "memory_usage": []
+        "inference_times_euler": [],
+        "inference_times_heun": [],
     }
     
-    for T in T_values:
-        for batch_size in batch_sizes:
-            print(f"\nTesting T={T}, batch_size={batch_size}")
-            
-            # Initialize model
-            key, model_key = jax.random.split(key)
-            model = init_noprop_model(
-                key=model_key,
-                T=T,
-                embed_dim=dataset_info["num_classes"],
-                input_channels=dataset_info["input_channels"]
-            )
-            
-            # Create dummy data
-            dummy_x = jnp.ones((batch_size, dataset_info["input_channels"], *dataset_info["input_size"]))
-            dummy_y = jnp.zeros(batch_size, dtype=jnp.int32)
-            
-            # Benchmark training step
-            key, train_key = jax.random.split(key)
-            optimizer = optax.adamw(learning_rate=1e-3)
-            state = create_train_state(model)
-            
-            # Warmup
-            for _ in range(3):
-                key, subkey = jax.random.split(key)
-                state, _ = train_step(state, dummy_x, dummy_y, subkey, optimizer)
-            
-            # Time training
-            start_time = time.time()
-            for _ in range(10):
-                key, subkey = jax.random.split(key)
-                state, _ = train_step(state, dummy_x, dummy_y, subkey, optimizer)
-            train_time = (time.time() - start_time) / 10
-            
+    for batch_size in batch_sizes:
+        # Initialize model (CT version)
+        key, model_key = jax.random.split(key)
+        model = init_noprop_model(
+            key=model_key,
+            num_classes=dataset_info["num_classes"],
+            embed_dim=256,
+            input_channels=dataset_info["input_channels"],
+        )
+        
+        # Create dummy data
+        dummy_x = jnp.ones(
+            (batch_size, dataset_info["input_channels"], *dataset_info["input_size"]), dtype=jnp.float32
+        )
+        dummy_y = jnp.zeros(batch_size, dtype=jnp.int32)
+        
+        # Benchmark training step
+        key, state_key = jax.random.split(key)
+        optimizer = optax.adamw(learning_rate=1e-3, weight_decay=1e-3)
+        state = create_train_state(model, optimizer, key=state_key)
+        
+        # Warmup
+        train_step(state, dummy_x, dummy_y, optimizer, eta=1.0)
+        
+        # Time training
+        start_time = time.time()
+        for _ in range(10): # Number of steps to average over
+            state, loss = train_step(state, dummy_x, dummy_y, optimizer, eta=1.0)
+        loss.block_until_ready()
+        train_time = (time.time() - start_time) / 10
+        
+        print(f"\nbatch_size={batch_size}")
+        print(f"Train time: {train_time:.4f}s")
+        for T in T_values:
+            print(f"\nTesting T={T}")
             # Benchmark inference
-            key, inf_key = jax.random.split(key)
             
             # Warmup
-            for _ in range(3):
-                key, subkey = jax.random.split(key)
-                _ = inference_step(state.model, dummy_x, subkey)
+            key_warmup, _ = jax.random.split(state.key) # Use key from state
+            key_inf_loop, key_warmup = jax.random.split(key_warmup)
+            inference_ct_euler(state.model, dummy_x, key_inf_loop, T_steps=T)
             
             # Time inference
+            key_time_inf, _ = jax.random.split(key_warmup)
             start_time = time.time()
-            for _ in range(10):
-                key, subkey = jax.random.split(key)
-                _ = inference_step(state.model, dummy_x, subkey)
-            inference_time = (time.time() - start_time) / 10
+            for _ in range(10): # Number of inference calls to average
+                key_inf_loop, key_time_inf = jax.random.split(key_time_inf)
+                pred = inference_ct_euler(state.model, dummy_x, key_inf_loop, T_steps=T)
+            pred.block_until_ready()
+            inference_time_euler = (time.time() - start_time) / 10
+
+            key_warmup, _ = jax.random.split(key_time_inf)
+            key_inf_loop, key_warmup = jax.random.split(key_warmup)
+            inference_ct_heun(state.model, dummy_x, key_inf_loop, T_steps=T)
+            
+            # Time inference
+            key_time_inf, _ = jax.random.split(key_warmup)
+            start_time = time.time()
+            for _ in range(10): # Number of inference calls to average
+                key_inf_loop, key_time_inf = jax.random.split(key_time_inf)
+                pred = inference_ct_heun(state.model, dummy_x, key_inf_loop, T_steps=T)
+            pred.block_until_ready()
+            inference_time_heun = (time.time() - start_time) / 10
             
             # Store results
-            results["T_values"].append(T)
+            results["T_values"].append(T) # Store T_steps used for inference
             results["batch_sizes"].append(batch_size)
             results["train_times"].append(train_time)
-            results["inference_times"].append(inference_time)
+            results["inference_times_euler"].append(inference_time_euler)
+            results["inference_times_heun"].append(inference_time_heun)
             
-            print(f"  Train time: {train_time:.4f}s")
-            print(f"  Inference time: {inference_time:.4f}s")
+            print(f"  Inference time Euler: {inference_time_euler:.4f}s")
+            print(f"  Inference time Heun: {inference_time_heun:.4f}s")
     
     return results
