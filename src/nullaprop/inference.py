@@ -6,239 +6,119 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from typing import Tuple
-from .models import NoPropModel, apply_mlp
-
-
-def forward_diffusion_step(carry: Tuple[jnp.ndarray, jax.random.PRNGKey, jnp.ndarray, int], 
-                          inputs: Tuple[float, jnp.ndarray]) -> Tuple[Tuple[jnp.ndarray, jax.random.PRNGKey, jnp.ndarray, int], jnp.ndarray]:
-    """
-    Single forward diffusion step following Equation 3 from the paper.
-    z_t = a_t * û_θ_t(z_{t-1}, x) + b_t * z_{t-1} + √c_t * ε_t
-    
-    Args:
-        carry: (z_prev, key, x_features, step) - previous state, random key, image features, and current step
-        inputs: (alpha_t, mlp_params_t) - noise schedule value and MLP parameters for this step
-        
-    Returns:
-        Updated carry and current state
-    """
-    z_prev, key, x_features, step = carry
-    alpha_t, mlp_params_t = inputs
-    
-    # Predict label embedding using MLP
-    u_hat = apply_mlp(mlp_params_t, x_features, z_prev)
-    
-    # Generate noise
-    key, subkey = jax.random.split(key)
-    noise = jax.random.normal(subkey, z_prev.shape)
-    
-    # Compute coefficients from Appendix A.3
-    # We need to compute a_t, b_t, c_t from the cumulative alphas
-    # For now, use simplified form based on the residual structure
-    alpha_bar_t = jnp.cumprod(jnp.array([alpha_t]))[0]  # This step's cumulative alpha
-    cond = step == 0
-    alpha_bar_prev = cond * 1.0 + (1 - cond) * alpha_bar_t / alpha_t  # Previous cumulative alpha
-    
-    # Coefficients from paper (simplified)
-    a_t = jnp.sqrt(alpha_bar_t * (1 - alpha_bar_prev) / (1 - alpha_bar_t))
-    b_t = jnp.sqrt(alpha_bar_prev * (1 - alpha_bar_t) / (1 - alpha_bar_t))  
-    c_t = (1 - alpha_bar_t) * (1 - alpha_bar_prev) / (1 - alpha_bar_t)
-    
-    # Apply Equation 3: z_t = a_t * û_θ_t(z_{t-1}, x) + b_t * z_{t-1} + √c_t * ε_t
-    z_t = a_t * u_hat + b_t * z_prev + jnp.sqrt(jnp.maximum(c_t, 1e-6)) * noise
-    
-    return (z_t, key, x_features, step + 1), z_t
+from .models import NoPropCT
 
 
 @eqx.filter_jit
-def inference_step(model: NoPropModel, x: jnp.ndarray, key: jax.random.PRNGKey) -> jnp.ndarray:
+def inference_ct_euler(
+    model: NoPropCT, 
+    x_imgs: jnp.ndarray, 
+    key: jax.random.PRNGKey, 
+    T_steps: int = 1000
+) -> jnp.ndarray:
     """
-    Perform inference using forward diffusion process as described in the paper.
-    
-    Starting from z_0 ~ N(0, I), apply the forward process:
-    z_t = a_t * û_θ_t(z_{t-1}, x) + b_t * z_{t-1} + √c_t * ε_t
-    
-    Then use the classifier to predict from z_T.
-    
+    Perform inference using the Euler method for the reverse ODE,
+    aligned with `run_noprop_ct_inference` from yhgon/NoProp.
+
     Args:
-        model: Trained NoProp model
-        x: Input images [batch_size, channels, height, width]
-        key: Random key for noise generation
+        model: Trained NoPropModel instance.
+        x_imgs: Input images [batch_size, channels, height, width].
+        key: JAX random key for initial noise.
+        T_steps: Number of discretization steps for the ODE solver.
         
     Returns:
-        Predicted class labels [batch_size]
+        Predicted class labels [batch_size].
     """
-    # Extract image features
-    x_features = model.extract_features(x)
-    batch_size = x.shape[0]
+    batch_size = x_imgs.shape[0]
+    embed_dim = model.embed_dim 
     
-    # Start from Gaussian noise z_0 ~ N(0, I)
-    key, subkey = jax.random.split(key)
-    z_init = jax.random.normal(subkey, (batch_size, model.embed_dim))
+    dt = 1.0 / T_steps
     
-    # Initialize carry for forward diffusion
-    carry_init = (z_init, key, x_features, 0)
-    scan_inputs = (model.alpha_schedule, model.mlp_params)
+    # Initial z at t=0 is pure noise N(0,I)
+    z = jax.random.normal(key, (batch_size, embed_dim))
     
-    # Perform forward diffusion using scan
-    (z_final, _, _, _), _ = jax.lax.scan(forward_diffusion_step, carry_init, scan_inputs)
+    # Define the loop body for jax.lax.fori_loop
+    def euler_step_body(i, current_z):
+        # Current time t = i / T_steps
+        t = jnp.full((batch_size, 1), i / T_steps)
+        
+        # Get ᾱ(t) from model's noise schedule
+        ab_t = jax.vmap(model.get_alpha_bar)(t) # [batch_size, 1]
+        
+        # Get logits: model.forward_unified(x_imgs, current_z, t)
+        logits = model(x_imgs, current_z, t)
+        
+        # Probabilities and predicted clean embedding
+        probabilities = jax.nn.softmax(logits, axis=1)
+        pred_e = probabilities @ model.embed_matrix # [batch_size, embed_dim]
+        
+        # Euler update: z_{t+dt} = z_t + dt * f(z_t, t)
+        # where f(z, t) = (pred_e(z,t) - z) / (1 - ᾱ(t))
+        dz_dt = (pred_e - current_z) / (1.0 - ab_t)
+        next_z = current_z + dt * dz_dt
+        return next_z
+
+    # Run the loop
+    z_final_approx_at_t1 = jax.lax.fori_loop(0, T_steps, euler_step_body, z)
     
-    # Use classifier to get final predictions
-    logits = jax.vmap(model.classifier)(z_final)
-    predictions = jnp.argmax(logits, axis=-1)
+    # Final prediction at t=1 using the evolved z
+    t_one = jnp.ones((batch_size, 1))
+    final_logits = model(x_imgs, z_final_approx_at_t1, t_one)
     
-    return predictions
+    return jnp.argmax(final_logits, axis=-1)
 
 
 @eqx.filter_jit
-def inference_step_deterministic(model: NoPropModel, x: jnp.ndarray) -> jnp.ndarray:
+def inference_ct_heun(
+    model: NoPropCT, 
+    x_imgs: jnp.ndarray, 
+    key: jax.random.PRNGKey, # key is for initial z, not used in loop if deterministic
+    T_steps: int = 40
+) -> jnp.ndarray:
     """
-    Perform deterministic inference (no noise in reverse process).
-    
+    Perform inference using the Heun method for the reverse ODE,
+    aligned with `run_noprop_ct_inference_heun` from yhgon/NoProp.
+
     Args:
-        model: Trained NoProp model
-        x: Input images [batch_size, channels, height, width]
+        model: Trained NoPropModel instance.
+        x_imgs: Input images [batch_size, channels, height, width].
+        key: JAX random key for initial noise.
+        T_steps: Number of discretization steps for the ODE solver.
         
     Returns:
-        Predicted class labels [batch_size]
+        Predicted class labels [batch_size].
     """
-    # Extract image features
-    x_features = model.extract_features(x)
-    batch_size = x.shape[0]
-    
-    # Start from zero (deterministic)
-    z_t = jnp.zeros((batch_size, model.embed_dim))
-    
-    # Reverse diffusion without noise
-    for t in reversed(range(model.T)):
-        alpha_t = model.alpha_schedule[t]
-        mlp_params_t = model.mlp_params[t]
-        
-        # Predict clean label
-        u_hat = apply_mlp(mlp_params_t, x_features, z_t)
-        
-        # Deterministic update (no noise)
-        z_t = jnp.sqrt(alpha_t) * u_hat
-    
-    # Get final predictions
-    predictions = jnp.argmax(z_t, axis=-1)
-    
-    return predictions
+    batch_size = x_imgs.shape[0]
+    embed_dim = model.embed_dim
+    dt = 1.0 / T_steps
 
+    z = jax.random.normal(key, (batch_size, embed_dim)) # Initial z ~ N(0,I)
 
-def inference_with_intermediate(model: NoPropModel, x: jnp.ndarray, key: jax.random.PRNGKey) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Perform inference and return intermediate states for visualization.
-    
-    Args:
-        model: Trained NoProp model
-        x: Input images [batch_size, channels, height, width]
-        key: Random key for noise generation
-        
-    Returns:
-        Tuple of (final_predictions, intermediate_states)
-        - final_predictions: [batch_size]
-        - intermediate_states: [T, batch_size, embed_dim]
-    """
-    # Extract image features
-    x_features = model.extract_features(x)
-    batch_size = x.shape[0]
-    
-    # Start from Gaussian noise z_0 ~ N(0, I)
-    key, subkey = jax.random.split(key)
-    z_init = jax.random.normal(subkey, (batch_size, model.embed_dim))
-    
-    # Initialize carry for forward diffusion
-    carry_init = (z_init, key, x_features, 0)
-    scan_inputs = (model.alpha_schedule, model.mlp_params)
-    
-    # Perform forward diffusion and collect intermediate states
-    (z_final, _, _, _), z_intermediates = jax.lax.scan(forward_diffusion_step, carry_init, scan_inputs)
-    
-    # Use classifier to get final predictions
-    logits = jax.vmap(model.classifier)(z_final)
-    predictions = jnp.argmax(logits, axis=-1)
-    
-    return predictions, z_intermediates
+    def heun_step_body(i, current_z):
+        t_n = jnp.full((batch_size, 1), i / T_steps)
+        t_np1 = jnp.full((batch_size, 1), (i + 1) / T_steps)
 
+        alpha_n = jax.vmap(model.get_alpha_bar)(t_n)
+        logits_n = model(x_imgs, current_z, t_n)
+        p_n = jax.nn.softmax(logits_n, axis=-1)
+        pred_n = p_n @ model.embed_matrix
+        f_n = (pred_n - current_z) / (1.0 - alpha_n)
 
-@eqx.filter_jit
-def batch_inference(model: NoPropModel, x: jnp.ndarray, key: jax.random.PRNGKey, batch_size: int = 128) -> jnp.ndarray:
-    """
-    Perform inference on large datasets by batching.
-    
-    Args:
-        model: Trained NoProp model
-        x: Input images [num_samples, channels, height, width]
-        key: Random key for noise generation
-        batch_size: Batch size for processing
+        # Predictor step (Euler)
+        z_mid_pred = current_z + dt * f_n
         
-    Returns:
-        Predicted class labels [num_samples]
-    """
-    num_samples = x.shape[0]
-    num_batches = (num_samples + batch_size - 1) // batch_size
-    
-    predictions = []
-    
-    for i in range(num_batches):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, num_samples)
+        # Corrector step
+        alpha_m = jax.vmap(model.get_alpha_bar)(t_np1) # alpha at t_{n+1} for z_mid
+        logits_mid = model(x_imgs, z_mid_pred, t_np1)
+        p_mid = jax.nn.softmax(logits_mid, axis=-1)
+        pred_mid = p_mid @ model.embed_matrix
+        f_mid = (pred_mid - z_mid_pred) / (1.0 - alpha_m)
         
-        # Get batch
-        x_batch = x[start_idx:end_idx]
-        
-        # Split key for this batch
-        key, subkey = jax.random.split(key)
-        
-        # Inference on batch
-        batch_preds = inference_step(model, x_batch, subkey)
-        predictions.append(batch_preds)
-    
-    return jnp.concatenate(predictions, axis=0)
+        next_z = current_z + 0.5 * dt * (f_n + f_mid)
+        return next_z
 
+    z_final_approx_at_t1 = jax.lax.fori_loop(0, T_steps, heun_step_body, z)
 
-def compute_prediction_confidence(model: NoPropModel, x: jnp.ndarray, key: jax.random.PRNGKey, num_samples: int = 10) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Compute prediction confidence using multiple stochastic forward passes.
-    
-    Args:
-        model: Trained NoProp model
-        x: Input images [batch_size, channels, height, width]
-        key: Random key for noise generation
-        num_samples: Number of stochastic samples
-        
-    Returns:
-        Tuple of (mean_predictions, prediction_std)
-    """
-    predictions_list = []
-    
-    for i in range(num_samples):
-        key, subkey = jax.random.split(key)
-        
-        # Get raw output (before argmax) for confidence estimation
-        x_features = model.extract_features(x)
-        batch_size = x.shape[0]
-        
-        # Start from random noise
-        key_noise, subkey = jax.random.split(subkey)
-        z_init = jax.random.normal(key_noise, (batch_size, model.embed_dim))
-        
-        # Forward diffusion
-        carry_init = (z_init, subkey, x_features, 0)
-        scan_inputs = (model.alpha_schedule, model.mlp_params)
-        
-        (z_final, _, _, _), _ = jax.lax.scan(forward_diffusion_step, carry_init, scan_inputs)
-        
-        # Get logits from classifier and apply softmax
-        logits = jax.vmap(model.classifier)(z_final)
-        probs = jax.nn.softmax(logits, axis=-1)
-        predictions_list.append(probs)
-    
-    # Stack and compute statistics
-    all_predictions = jnp.stack(predictions_list, axis=0)  # [num_samples, batch_size, num_classes]
-    
-    mean_predictions = jnp.mean(all_predictions, axis=0)
-    prediction_std = jnp.std(all_predictions, axis=0)
-    
-    return mean_predictions, prediction_std
+    t_one = jnp.ones((batch_size, 1))
+    final_logits = model(x_imgs, z_final_approx_at_t1, t_one)
+    return jnp.argmax(final_logits, axis=-1)
