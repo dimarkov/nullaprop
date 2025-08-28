@@ -74,7 +74,7 @@ def run_experiment(
     optimizer = optax.adamw(learning_rate=learning_rate, weight_decay=1e-3)
     # create_train_state now requires a key
     key, state_key = jax.random.split(key)
-    state = create_train_state(model, optimizer, key=state_key, learning_rate=learning_rate)
+    state = create_train_state(model, optimizer, key=state_key)
     
     # Training loop
     print(f"\nStarting training for {epochs} epochs...")

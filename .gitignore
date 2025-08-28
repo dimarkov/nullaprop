@@ -221,9 +221,6 @@ runs/
 logs/
 tensorboard/
 
-# Jupyter notebook outputs
-*.ipynb
-
 # JAX specific
 # JAX compilation cache
 jax_cache/
