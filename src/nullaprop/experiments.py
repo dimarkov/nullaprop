@@ -11,7 +11,7 @@ from typing import Dict, Any, Tuple
 import matplotlib.pyplot as plt
 
 from .models import init_noprop_model # This is the new init_noprop_model
-from .training import create_train_state, train_step, compute_loss_aligned
+from .training import create_train_state, train_step, compute_loss
 from .inference import inference_ct_euler, inference_ct_heun # New inference functions
 # inference_with_intermediate might need an update or replacement if its logic was tied to old model
 from .utils import (
@@ -113,7 +113,7 @@ def run_experiment(
                 test_total += len(y_test)
                 
                 key_loss, eval_key = jax.random.split(eval_key)
-                loss_val = compute_loss_aligned(state.model, x_test, y_test, key_loss, eta=1.0)
+                loss_val, _ = compute_loss(state.model, x_test, y_test, key_loss, eta=1.0)
                 test_loss_sum += loss_val
                 test_batches +=1
 
@@ -133,12 +133,12 @@ def run_experiment(
     test_batches_final = 0
     for x_test, y_test in test_iterator:
         key_inf, final_eval_key = jax.random.split(final_eval_key)
-        preds = inference_ct_euler(state.model, x_test, key_inf, T_steps=100) # More steps for final
+        preds = inference_ct_euler(state.model, x_test, key_inf, T_steps=T) # More steps for final
         test_correct_final += jnp.sum(preds == y_test)
         test_total_final += len(y_test)
         
         key_loss, final_eval_key = jax.random.split(final_eval_key)
-        loss_val = compute_loss_aligned(state.model, x_test, y_test, key_loss, eta=1.0)
+        loss_val, _ = compute_loss(state.model, x_test, y_test, key_loss, eta=1.0)
         test_loss_sum_final += loss_val
         test_batches_final +=1
         

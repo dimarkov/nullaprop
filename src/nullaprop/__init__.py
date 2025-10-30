@@ -5,8 +5,8 @@ JAX/Equinox Implementation
 A novel training method using diffusion-based denoising for independent layer training.
 """
 
-from .models import NoPropCT, CNN, init_noprop_model, LabelEncoder, TimeEncoder, FuseHead, NoiseSchedule, sinusoidal_embedding_jax
-from .training import train_step, create_train_state, TrainState, compute_loss_aligned
+from .models import NoPropCT, CNN, init_noprop_model, LabelEncoder, TimeEncoder, FuseHead, NoiseSchedule, sinusoidal_embedding
+from .training import train_step, create_train_state, TrainState, compute_loss
 from .inference import inference_ct_euler, inference_ct_heun
 from .utils import (
     load_data, get_dataset_info, print_model_summary, initialize_with_prototypes_jax,
@@ -26,13 +26,13 @@ __all__ = [
     "TimeEncoder",
     "FuseHead",
     "NoiseSchedule",
-    "sinusoidal_embedding_jax",
+    "sinusoidal_embedding",
     
     # Training
     "train_step",
     "create_train_state",
     "TrainState",
-    "compute_loss_aligned",
+    "compute_loss",
     
     # Inference
     "inference_ct_euler",
