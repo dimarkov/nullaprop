@@ -13,7 +13,7 @@ from collections.abc import Sequence
 # ----------------------------------------------------------------------------
 # Sinusoidal embedding for scalar t (JAX version)
 # ----------------------------------------------------------------------------
-def sinusoidal_embedding_jax(t: jnp.ndarray, dim: int) -> jnp.ndarray:
+def sinusoidal_embedding(t: jnp.ndarray, freqs: jnp.ndarray, dim: int) -> jnp.ndarray:
     """
     Generates sinusoidal embeddings for a batch of scalar time values.
     Args:
@@ -24,11 +24,8 @@ def sinusoidal_embedding_jax(t: jnp.ndarray, dim: int) -> jnp.ndarray:
     """
     if t.ndim > 1:
         t = t[..., None] # Ensure t is [B, 1]
-    half = dim // 2
-    freqs = jnp.exp(
-        -math.log(10000) * jnp.arange(half, dtype=t.dtype) / (half - 1)
-    )
-    args = t * freqs
+
+    args = 2 * jnp.pi * t * freqs
     embedding = jnp.concatenate([jnp.sin(args), jnp.cos(args)], axis=-1)
     if dim % 2 == 1: # Handle odd dimensions
         pad_width = [(0, 0)] * embedding.ndim
@@ -147,16 +144,22 @@ class LabelEncoder(eqx.Module):
 class TimeEncoder(eqx.Module):
     """Encodes a timestamp t (shape [B,1]) into embedding (shape [B, embed_dim])."""
     fc: eqx.nn.Linear
+    linear: eqx.nn.Linear
     time_emb_dim_internal: int # The dimension of the raw sinusoidal embedding
+    freqs: Array
 
     def __init__(self, time_emb_dim_internal: int, embed_dim: int, *, key: jax.random.PRNGKey):
         self.time_emb_dim_internal = time_emb_dim_internal
-        self.fc = eqx.nn.Linear(time_emb_dim_internal, embed_dim, key=key)
+        k1, k2, k3 = jax.random.split(key, 3)
+        self.linear = eqx.nn.Linear(time_emb_dim_internal, embed_dim, key=k1)
+        self.fc = eqx.nn.Linear(embed_dim, embed_dim, key=k2)
+        half = time_emb_dim_internal // 2
+        self.freqs = jax.random.normal(k3, half)
 
     def __call__(self, t: jnp.ndarray) -> jnp.ndarray:
         # t: [B,1] -> sinusoidal [B, time_emb_dim_internal]
-        te = sinusoidal_embedding_jax(t, self.time_emb_dim_internal)
-        return jax.nn.relu(self.fc(te)) # Apply ReLU as in PyTorch version's Sequential
+        te = sinusoidal_embedding(t, self.freqs, self.time_emb_dim_internal)
+        return self.fc(jax.nn.swish(self.linear(te)))
 
 class FuseHead(eqx.Module):
     """Combines image, z, and t features, and outputs class logits."""
@@ -213,7 +216,7 @@ class NoPropCT(eqx.Module):
     NoProp continuous time (CT) model aligned with yhgon/NoProp (PyTorch) structure.
     """
     cnn: CNN
-    label_enc: LabelEncoder
+    label_embedding: LabelEncoder
     time_enc: TimeEncoder
     fuse_head: FuseHead
     noise_schedule: NoiseSchedule
@@ -238,7 +241,7 @@ class NoPropCT(eqx.Module):
         k_cnn, k_label, k_time, k_fuse, k_noise, k_embed_matrix = jax.random.split(key, 6)
         
         self.cnn = CNN(key=k_cnn, input_channels=input_channels, feature_dim=embed_dim)
-        self.label_enc = LabelEncoder(embed_dim=embed_dim, key=k_label)
+        self.label_embedding = LabelEncoder(embed_dim=embed_dim, key=k_label)
         # The embed_dim for TimeEncoder is the target dimension after FC layer, matching other embed_dims
         self.time_enc = TimeEncoder(time_emb_dim_internal=time_emb_dim_internal, embed_dim=embed_dim, key=k_time)
         self.fuse_head = FuseHead(embed_dim=embed_dim, mid_dim=mid_dim, num_classes=num_classes, key=k_fuse)
@@ -249,11 +252,17 @@ class NoPropCT(eqx.Module):
         self.num_classes = num_classes
         self.embed_dim = embed_dim
 
+    def label_enc(self, labels: jnp.ndarray, **kwargs) -> jnp.ndarray:
+        return self.embed_matrix[labels]
+
+    def prob_enc(self, probs: jnp.ndarray, **kwargs) -> jnp.ndarray:
+        return probs @ self.embed_matrix
+
     def get_alpha_bar(self, t: jnp.ndarray) -> jnp.ndarray:
         """Convenience method to get alpha_bar from the noise schedule."""
         return self.noise_schedule.alpha_bar(t)
 
-    def __call__(self, x_imgs: jnp.ndarray, z_label_embedding_noisy: jnp.ndarray, t_continuous: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x_imgs: jnp.ndarray, z_label_embedding_noisy: jnp.ndarray, t_continuous: jnp.ndarray, **kwargs) -> jnp.ndarray:
         """
         Unified forward pass through the model components.
         Args:
@@ -264,7 +273,7 @@ class NoPropCT(eqx.Module):
             Logits from the FuseHead [batch_size, num_classes]
         """
         fx = self.cnn(x_imgs)  # [embed_dim]
-        fz = jax.vmap(self.label_enc)(z_label_embedding_noisy)  # [embed_dim]
+        fz = jax.vmap(self.label_embedding)(z_label_embedding_noisy)  # [embed_dim]
         ft = jax.vmap(self.time_enc)(t_continuous)  # [embed_dim]
 
         return jax.vmap(self.fuse_head)(fx, fz, ft)
